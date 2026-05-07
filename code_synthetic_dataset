@@ -1,0 +1,338 @@
+"""
+Generate three synthetic youth team datasets:
+  - Women's Football U14 (Danish girls, born 2012)
+  - Ice Hockey U16 (Danish boys, born 2010)
+  - Elite Soccer U16 (Danish boys, born 2010)
+
+Encoded effects (sport-specific selection pressure on biological maturation):
+  - Hockey U16:  HIGH selection on maturity (mean z = +0.85, sd = 0.65)
+                 Heavy contact, body checking, skating power favour early maturers.
+  - Soccer U16:  MED selection (mean z = +0.55, sd = 0.80)
+                 Strong but less than hockey; some technical positions favour
+                 late maturers, and bio-banding is being introduced.
+  - Football U14 (girls):  LOW, slightly negative (mean z = -0.10, sd = 0.95)
+                           Early maturation can be a disadvantage in girls.
+
+Relative age effect (RAE) by sport:
+  - Hockey:    65% Q1+Q2  (moderate-strong)
+  - Soccer:    75% Q1+Q2  (very strong; elite male soccer shows largest RAE)
+  - Football:  55% Q1+Q2  (weak; Q2 may peak above Q1)
+
+Hidden gems planted in each squad: a Q3/Q4 player with low maturity z is
+force-boosted to high underlying talent. Students should identify these as
+'protect from cuts' candidates.
+"""
+
+import csv
+import random
+from datetime import date, timedelta
+import numpy as np
+
+# Reproducibility
+random.seed(7)
+np.random.seed(7)
+
+# ---------- Name pools ----------
+GIRL_FIRST = ["Freja","Ida","Clara","Sofia","Emma","Alma","Anna","Olivia","Ella","Laura",
+              "Maja","Karla","Liva","Mathilde","Naja","Mille","Josefine","Agnes","Esther","Sigrid",
+              "Astrid","Caroline","Nora","Lærke","Victoria","Andrea","Filippa","Marie","Selma","Vilma"]
+
+BOY_FIRST = ["William","Oscar","Lucas","Noah","Magnus","Emil","Frederik","Victor","Oliver","Aksel",
+             "Alfred","August","Valdemar","Storm","Malthe","Anton","Elias","Mikkel","Mads","Tobias",
+             "Jonas","Nikolaj","Sebastian","Christian","Andreas","Mathias","Rasmus","Kasper","Daniel","Simon",
+             "Felix","Carl","Theo","Hugo","Arthur","Otto","Bertram","Johan","Vincent","Adam"]
+
+LAST_NAMES = ["Nielsen","Jensen","Hansen","Pedersen","Andersen","Christensen","Larsen","Sørensen",
+              "Rasmussen","Jørgensen","Petersen","Madsen","Kristensen","Olsen","Thomsen","Christiansen",
+              "Poulsen","Johansen","Møller","Mortensen","Knudsen","Schmidt","Eriksen","Holm","Lund",
+              "Berg","Bach","Dahl","Brandt","Krogh"]
+
+
+# ---------- Helpers ----------
+def birthdate_in_quarter(year, quarter):
+    """Random birthdate in calendar-year quarter (1-4) of given year."""
+    q_starts = [(1,1), (4,1), (7,1), (10,1)]
+    q_ends   = [(3,31),(6,30),(9,30),(12,31)]
+    s_m, s_d = q_starts[quarter-1]
+    e_m, e_d = q_ends[quarter-1]
+    start = date(year, s_m, s_d)
+    end   = date(year, e_m, e_d)
+    return start + timedelta(days=random.randint(0, (end-start).days))
+
+
+def pick_unique_name(used, pool):
+    name = random.choice(pool)
+    while name in used:
+        name = random.choice(pool)
+    used.add(name)
+    return name
+
+
+def parents_girl():
+    return random.randint(158,178), random.randint(170,192)
+
+
+def parents_boy():
+    return random.randint(160,180), random.randint(172,196)
+
+
+# ---------- Continuous maturity model ----------
+def draw_maturity_squad(n, mean_z, sd_z):
+    """Draw n maturity z-scores from a Normal distribution."""
+    return np.random.normal(mean_z, sd_z, n)
+
+
+def anthro_boy_continuous(z):
+    """Boy U16: height and weight are continuous functions of maturity z."""
+    h = 174 + 8 * z + np.random.normal(0, 2)
+    w = 65 + 10 * z + np.random.normal(0, 3)
+    return int(round(h)), round(float(w), 1)
+
+
+def anthro_girl_continuous(z):
+    """Girl U14: height and weight are continuous functions of maturity z."""
+    h = 161 + 7 * z + np.random.normal(0, 2)
+    w = 50 + 8 * z + np.random.normal(0, 2.5)
+    return int(round(h)), round(float(w), 1)
+
+
+# ---------- Talent / performance models ----------
+def talent_boy_hockey(z, quarter, hidden_gem):
+    """Hockey: maturation matters A LOT, plus strong RAE."""
+    if hidden_gem:
+        return random.uniform(0.85, 1.0)
+    base = 0.45 + 0.18 * z
+    if quarter == 1: base += 0.12
+    elif quarter == 2: base += 0.06
+    elif quarter == 4: base -= 0.08
+    base += random.uniform(-0.08, 0.08)
+    return max(0.05, min(1.0, base))
+
+
+def talent_boy_soccer(z, quarter, hidden_gem):
+    """Soccer: maturation matters but less than hockey."""
+    if hidden_gem:
+        return random.uniform(0.85, 1.0)
+    base = 0.45 + 0.10 * z
+    if quarter == 1: base += 0.10
+    elif quarter == 2: base += 0.05
+    elif quarter == 4: base -= 0.06
+    base += random.uniform(-0.10, 0.10)
+    return max(0.05, min(1.0, base))
+
+
+def talent_girl_football(z, quarter, hidden_gem):
+    """Girls football U14: early maturation slight disadvantage; weak RAE."""
+    if hidden_gem:
+        return random.uniform(0.85, 1.0)
+    base = 0.50 - 0.06 * z   # negative slope: early maturers slightly worse
+    if quarter == 1: base += 0.04
+    elif quarter == 2: base += 0.05
+    elif quarter == 4: base -= 0.02
+    base += random.uniform(-0.08, 0.08)
+    return max(0.05, min(1.0, base))
+
+
+# ===================================================================
+# DATASET 1: Women's football U14
+# ===================================================================
+def build_football_u14():
+    n = 20
+    target_q = [5, 6, 5, 4]   # Q1, Q2, Q3, Q4
+    quarters = []
+    for q, count in enumerate(target_q, start=1):
+        quarters.extend([q] * count)
+    random.shuffle(quarters)
+
+    zs = draw_maturity_squad(n, mean_z=-0.10, sd_z=0.95)
+
+    # Hidden gem: Q3/Q4 player with the lowest maturity z
+    hidden = []
+    sorted_idx = sorted(range(n), key=lambda i: zs[i])
+    for i in sorted_idx:
+        if quarters[i] in (3, 4) and not hidden:
+            hidden.append(i); break
+    if not hidden:
+        hidden.append(sorted_idx[0])
+
+    positions = (["GK"]*2 + ["DF"]*6 + ["MF"]*8 + ["FW"]*4)
+    random.shuffle(positions)
+
+    used = set()
+    rows = []
+    for i in range(n):
+        first = pick_unique_name(used, GIRL_FIRST)
+        last = random.choice(LAST_NAMES)
+        bd = birthdate_in_quarter(2012, quarters[i])
+        h, w = anthro_girl_continuous(zs[i])
+        mh, dh = parents_girl()
+        pos = positions[i]
+        apps = random.randint(14, 22)
+        talent = talent_girl_football(zs[i], quarters[i], i in hidden)
+
+        if pos == "GK":
+            goals = 0
+            assists = random.choices([0, 1, 2], weights=[60, 30, 10])[0]
+            clean_sheets = max(0, int(round(talent * 9 + random.uniform(-1, 1))))
+        else:
+            scoring_base = {"FW": 18, "MF": 9,  "DF": 4}[pos]
+            assist_base  = {"FW": 8,  "MF": 9,  "DF": 4}[pos]
+            goals   = max(0, int(round(talent * scoring_base + random.uniform(-2, 2))))
+            assists = max(0, int(round(talent * assist_base  + random.uniform(-2, 2))))
+            clean_sheets = ""
+
+        yellow = random.choices([0, 1, 2, 3, 4], weights=[40, 25, 20, 10, 5])[0]
+        rows.append([i + 1, f"{first} {last}", bd.isoformat(), pos, h, w, mh, dh,
+                     apps, goals, assists, clean_sheets, yellow])
+    return rows
+
+
+# ===================================================================
+# DATASET 2: Ice hockey U16
+# ===================================================================
+def build_hockey_u16():
+    n = 20
+    target_q = [7, 6, 4, 3]
+    quarters = []
+    for q, count in enumerate(target_q, start=1):
+        quarters.extend([q] * count)
+    random.shuffle(quarters)
+
+    zs = draw_maturity_squad(n, mean_z=+0.85, sd_z=0.65)
+
+    hidden = []
+    sorted_idx = sorted(range(n), key=lambda i: zs[i])
+    for i in sorted_idx:
+        if quarters[i] in (3, 4) and not hidden:
+            hidden.append(i); break
+    if not hidden:
+        hidden.append(sorted_idx[0])
+
+    positions = (["G"]*2 + ["D"]*7 + ["C"]*4 + ["LW"]*3 + ["RW"]*4)
+    random.shuffle(positions)
+
+    used = set()
+    rows = []
+    for i in range(n):
+        first = pick_unique_name(used, BOY_FIRST)
+        last = random.choice(LAST_NAMES)
+        bd = birthdate_in_quarter(2010, quarters[i])
+        h, w = anthro_boy_continuous(zs[i])
+        mh, dh = parents_boy()
+        pos = positions[i]
+        games = random.randint(22, 32)
+        talent = talent_boy_hockey(zs[i], quarters[i], i in hidden)
+
+        if pos == "G":
+            goals = 0
+            assists = max(1, int(round(talent * 4 + random.uniform(-1, 2))))
+            sv_pct = round(0.870 + talent * 0.060 + random.uniform(-0.010, 0.010), 3)
+            gaa = round(3.80 - talent * 1.80 + random.uniform(-0.20, 0.20), 2)
+            pim = random.randint(0, 6)
+            plus_minus = ""
+        else:
+            scoring_base = {"C": 22, "LW": 20, "RW": 20, "D": 8}[pos]
+            assist_base  = {"C": 28, "LW": 20, "RW": 20, "D": 16}[pos]
+            goals   = max(0, int(round(talent * scoring_base + random.uniform(-3, 3))))
+            assists = max(0, int(round(talent * assist_base  + random.uniform(-3, 3))))
+            sv_pct = ""
+            gaa = ""
+            pim = random.randint(2, 36)
+            plus_minus = int(round((talent - 0.5) * 30 + random.uniform(-4, 4)))
+
+        points = goals + assists if isinstance(assists, int) else goals
+        rows.append([i + 1, f"{first} {last}", bd.isoformat(), pos, h, w, mh, dh,
+                     games, goals, assists, points, plus_minus, pim, sv_pct, gaa])
+    return rows
+
+
+# ===================================================================
+# DATASET 3: Elite soccer U16
+# ===================================================================
+def build_soccer_u16():
+    n = 20
+    target_q = [9, 6, 3, 2]
+    quarters = []
+    for q, count in enumerate(target_q, start=1):
+        quarters.extend([q] * count)
+    random.shuffle(quarters)
+
+    zs = draw_maturity_squad(n, mean_z=+0.55, sd_z=0.80)
+
+    # Plant up to 2 hidden gems
+    hidden = []
+    sorted_idx = sorted(range(n), key=lambda i: zs[i])
+    for i in sorted_idx:
+        if quarters[i] in (3, 4) and len(hidden) < 2:
+            hidden.append(i)
+    if not hidden:
+        hidden.append(sorted_idx[0])
+
+    positions = (["GK"]*2 + ["CB"]*4 + ["FB"]*4 + ["CM"]*5
+                 + ["AM"]*1 + ["W"]*2 + ["ST"]*2)
+    random.shuffle(positions)
+
+    used = set()
+    rows = []
+    for i in range(n):
+        first = pick_unique_name(used, BOY_FIRST)
+        last = random.choice(LAST_NAMES)
+        bd = birthdate_in_quarter(2010, quarters[i])
+        h, w = anthro_boy_continuous(zs[i])
+        mh, dh = parents_boy()
+        pos = positions[i]
+        apps = random.randint(20, 28)
+        minutes = apps * random.randint(60, 88)
+        talent = talent_boy_soccer(zs[i], quarters[i], i in hidden)
+
+        if pos == "GK":
+            goals = 0
+            assists = max(0, int(round(talent * 2)))
+            clean_sheets = max(0, int(round(talent * 12 + random.uniform(-1, 1))))
+            shots = 0
+        else:
+            scoring_base = {"ST": 22, "W": 12, "AM": 11, "CM": 6,  "FB": 3, "CB": 2}[pos]
+            assist_base  = {"ST": 8,  "W": 12, "AM": 12, "CM": 10, "FB": 5, "CB": 3}[pos]
+            goals   = max(0, int(round(talent * scoring_base + random.uniform(-2, 2))))
+            assists = max(0, int(round(talent * assist_base  + random.uniform(-2, 2))))
+            shots   = max(0, int(round(goals * random.uniform(3, 6) + random.uniform(0, 6))))
+            clean_sheets = ""
+
+        yellow = random.choices([0,1,2,3,4,5,6], weights=[20,25,20,15,10,7,3])[0]
+        red    = random.choices([0, 1], weights=[19, 1])[0]
+        rows.append([i + 1, f"{first} {last}", bd.isoformat(), pos, h, w, mh, dh,
+                     apps, minutes, goals, assists, shots,
+                     clean_sheets, yellow, red])
+    return rows
+
+
+# ===================================================================
+# Run and save to CSV
+# ===================================================================
+if __name__ == "__main__":
+    football = build_football_u14()
+    hockey   = build_hockey_u16()
+    soccer   = build_soccer_u16()
+
+    headers_football = ["#", "Name", "Birthdate", "Pos", "Height_cm", "Weight_kg",
+                        "Mom_height_cm", "Dad_height_cm", "Apps", "Goals", "Assists",
+                        "Clean_sheets", "Yellow_cards"]
+
+    headers_hockey = ["#", "Name", "Birthdate", "Pos", "Height_cm", "Weight_kg",
+                      "Mom_height_cm", "Dad_height_cm", "Games", "Goals", "Assists",
+                      "Points", "Plus_minus", "PIM", "SV_pct", "GAA"]
+
+    headers_soccer = ["#", "Name", "Birthdate", "Pos", "Height_cm", "Weight_kg",
+                      "Mom_height_cm", "Dad_height_cm", "Apps", "Minutes", "Goals",
+                      "Assists", "Shots", "Clean_sheets", "Yellow", "Red"]
+
+    for filename, headers, rows in [
+        ("women_football_u14.csv", headers_football, football),
+        ("ice_hockey_u16.csv",     headers_hockey,   hockey),
+        ("elite_soccer_u16.csv",   headers_soccer,   soccer),
+    ]:
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            writer.writerows(rows)
+        print(f"Wrote {filename}: {len(rows)} rows")
